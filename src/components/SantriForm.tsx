@@ -3,7 +3,7 @@ import { motion, AnimatePresence } from 'motion/react';
 import { 
   Sun, Moon, BookOpen, Star, Sparkles, Heart, 
   User, ChevronRight, CheckCircle2, Award, ArrowLeft, Calendar, Camera, Video,
-  PenLine, History, MessageSquare, Check, MessageCircle, Send, Printer, Share2
+  PenLine, History, MessageSquare, Check, MessageCircle, Send, Printer, Share2, Lock
 } from 'lucide-react';
 import { Santri, ShalatStatus, QuranDetails, Report, PrayerDetail, Attendance } from '../types';
 import SignaturePad from './SignaturePad';
@@ -787,13 +787,14 @@ export default function SantriForm({
                     setStep(1);
                     setSubTab('harian');
                   }}
-                  className="flex items-center gap-1 text-xs text-slate-500 hover:text-slate-700"
+                  className="py-1 px-2.5 bg-rose-50 text-rose-600 hover:bg-rose-100 hover:text-rose-700 rounded-xl transition-all flex items-center gap-1 text-[11px] font-extrabold border border-rose-200/40 cursor-pointer active:scale-95"
+                  title="Keluar dari Sesi Laporan Santri ini"
                 >
-                  <ArrowLeft className="w-3.5 h-3.5" /> Kembali
+                  <Lock className="w-3 h-3" /> Keluar Sesi
                 </button>
                 <div className="text-right">
-                  <p className="text-[10px] text-slate-400">Santri:</p>
-                  <p className="text-xs font-bold text-emerald-800">{selectedSantri?.name}</p>
+                  <p className="text-[10px] text-slate-400 font-bold">Santri Aktif:</p>
+                  <p className="text-xs font-extrabold text-emerald-800">{selectedSantri?.name}</p>
                 </div>
               </div>
 

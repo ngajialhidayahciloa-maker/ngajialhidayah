@@ -15,7 +15,9 @@ import {
   deleteSantriFromFirestore, 
   saveReportToFirestore, 
   saveAttendanceListToFirestore, 
-  seedInitialData 
+  seedInitialData,
+  getPinsFromFirestore,
+  savePinsToFirestore
 } from './firebase';
 
 // Mock Initial Santri Profiles
@@ -108,6 +110,13 @@ export default function App() {
   const [activeSantriId, setActiveSantriId] = useState<string>('');
   const [loading, setLoading] = useState<boolean>(true);
 
+  // Dynamic PINs for managers
+  const [pins, setPins] = useState<{ admin_l: string; admin_p: string; guru: string }>({
+    admin_l: '1111',
+    admin_p: '2222',
+    guru: '9999'
+  });
+
   // Production Security & Session states
   const [unlockedRoles, setUnlockedRoles] = useState<string[]>(() => {
     const saved = sessionStorage.getItem('unlocked_roles');
@@ -135,15 +144,8 @@ export default function App() {
 
   const handleVerifyPin = (e: React.FormEvent) => {
     e.preventDefault();
-    let expectedPin = '';
-    
-    if (pendingRole === 'admin_l') {
-      expectedPin = '1111';
-    } else if (pendingRole === 'admin_p') {
-      expectedPin = '2222';
-    } else if (pendingRole === 'guru') {
-      expectedPin = '9999';
-    }
+    if (!pendingRole) return;
+    const expectedPin = pins[pendingRole];
 
     if (enteredPin.trim() === expectedPin) {
       const updatedUnlocked = [...unlockedRoles, pendingRole!];
@@ -166,7 +168,16 @@ export default function App() {
       const firestoreReports = await getReportsFromFirestore();
       const firestoreAttendance = await getAttendanceFromFirestore();
 
-      if (firestoreSantri.length > 0) {
+      const firestorePins = await getPinsFromFirestore();
+      if (firestorePins) {
+        setPins(firestorePins);
+        localStorage.setItem('laporan_santri_pins', JSON.stringify(firestorePins));
+      } else {
+        await savePinsToFirestore(pins);
+        localStorage.setItem('laporan_santri_pins', JSON.stringify(pins));
+      }
+
+      if (firestoreSantri.length > 0 || firestorePins) {
         // Sort reports by submittedAt descending to ensure newest are first
         const sortedReports = [...firestoreReports].sort((a, b) => new Date(b.submittedAt).getTime() - new Date(a.submittedAt).getTime());
         setSantriList(firestoreSantri);
@@ -200,6 +211,11 @@ export default function App() {
       const localSantri = localStorage.getItem('laporan_santri_profiles');
       const localReports = localStorage.getItem('laporan_santri_reports');
       const localAttendance = localStorage.getItem('laporan_santri_attendance');
+      const localPins = localStorage.getItem('laporan_santri_pins');
+
+      if (localPins) {
+        setPins(JSON.parse(localPins));
+      }
 
       if (localSantri) {
         setSantriList(JSON.parse(localSantri));
@@ -234,12 +250,24 @@ export default function App() {
     syncWithFirestore();
   }, []);
 
-  // Set first student as default active
+  // Set last selected student as default active
   useEffect(() => {
     if (santriList.length > 0 && !activeSantriId) {
-      setActiveSantriId(santriList[0].id);
+      const savedActiveId = localStorage.getItem('last_selected_santri_id');
+      if (savedActiveId && santriList.some(s => s.id === savedActiveId)) {
+        setActiveSantriId(savedActiveId);
+      } else {
+        setActiveSantriId(santriList[0].id);
+      }
     }
   }, [santriList, activeSantriId]);
+
+  // Persist selected student to localStorage for parents
+  useEffect(() => {
+    if (activeSantriId) {
+      localStorage.setItem('last_selected_santri_id', activeSantriId);
+    }
+  }, [activeSantriId]);
 
   // Save updates helper
   const saveSantri = (updatedList: Santri[], itemToUpdate?: Santri) => {
@@ -362,6 +390,12 @@ export default function App() {
     saveReports(updatedReports, updatedReport);
   };
 
+  const handleUpdatePins = (newPins: { admin_l: string; admin_p: string; guru: string }) => {
+    setPins(newPins);
+    localStorage.setItem('laporan_santri_pins', JSON.stringify(newPins));
+    savePinsToFirestore(newPins);
+  };
+
   // Force resets database to defaults (secured for production)
   const handleResetToDefaults = async () => {
     if (role !== 'guru') {
@@ -370,7 +404,7 @@ export default function App() {
     }
 
     const pinConfirm = prompt('Masukkan PIN Super Admin (Guru Ngaji) untuk konfirmasi reset database:');
-    if (pinConfirm !== '9999') {
+    if (pinConfirm !== pins.guru) {
       alert('PIN Super Admin salah! Reset dibatalkan.');
       return;
     }
@@ -386,6 +420,11 @@ export default function App() {
         ];
         await seedInitialData(INITIAL_SANTRI, INITIAL_REPORTS, initialAttendance);
         
+        const defaultPins = { admin_l: '1111', admin_p: '2222', guru: '9999' };
+        await savePinsToFirestore(defaultPins);
+        setPins(defaultPins);
+        localStorage.setItem('laporan_santri_pins', JSON.stringify(defaultPins));
+
         setSantriList(INITIAL_SANTRI);
         setReports(INITIAL_REPORTS);
         setAttendance(initialAttendance);
@@ -498,18 +537,6 @@ export default function App() {
               >
                 <ShieldCheck className="w-3.5 h-3.5" /> Guru Ngaji
               </button>
-
-              {role !== 'santri' && (
-                <button
-                  type="button"
-                  onClick={handleLockSession}
-                  className="p-1.5 text-slate-400 hover:text-red-500 hover:bg-white/80 rounded-xl transition-all flex items-center justify-center"
-                  title="Kunci Sesi Pengelola"
-                  id="lock-session-btn"
-                >
-                  <Lock className="w-3.5 h-3.5" />
-                </button>
-              )}
             </div>
           </div>
         </div>
@@ -580,6 +607,9 @@ export default function App() {
                 onDeleteSantri={handleDeleteSantri}
                 currentRole={role}
                 onRefreshData={syncWithFirestore}
+                pins={pins}
+                onUpdatePins={handleUpdatePins}
+                onLogout={handleLockSession}
               />
             </motion.div>
           )}
@@ -634,15 +664,15 @@ export default function App() {
 
               {/* Demo Helper Tip (Extremely helpful for review & testing) */}
               <div className="bg-emerald-50/50 border border-emerald-100/30 p-3 rounded-2xl text-[10px] text-emerald-800 space-y-1">
-                <p className="font-extrabold">💡 Petunjuk PIN Default:</p>
+                <p className="font-extrabold">💡 Petunjuk PIN Pengaman Saat Ini:</p>
                 <p className="font-medium">
-                  • Admin L: <strong className="font-extrabold font-mono">1111</strong>
+                  • Admin L: <strong className="font-extrabold font-mono">{pins.admin_l}</strong>
                 </p>
                 <p className="font-medium">
-                  • Admin P: <strong className="font-extrabold font-mono">2222</strong>
+                  • Admin P: <strong className="font-extrabold font-mono">{pins.admin_p}</strong>
                 </p>
                 <p className="font-medium">
-                  • Guru Ngaji: <strong className="font-extrabold font-mono">9999</strong>
+                  • Guru Ngaji: <strong className="font-extrabold font-mono">{pins.guru}</strong>
                 </p>
               </div>
 

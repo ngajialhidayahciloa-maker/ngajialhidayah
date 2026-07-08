@@ -1,4 +1,4 @@
-import React, { useState, useMemo } from 'react';
+import React, { useState, useMemo, useEffect } from 'react';
 import { motion, AnimatePresence } from 'motion/react';
 import { 
   Users, CheckSquare, Calendar, Sparkles, BookOpen, 
@@ -20,6 +20,9 @@ interface GuruDashboardProps {
   currentRole?: 'guru' | 'admin_l' | 'admin_p';
   attendance: Attendance[];
   onSaveAttendance: (attendance: Attendance[]) => void;
+  pins?: { admin_l: string; admin_p: string; guru: string };
+  onUpdatePins?: (newPins: { admin_l: string; admin_p: string; guru: string }) => void;
+  onLogout?: () => void;
 }
 
 type TabType = 'dashboard' | 'add-santri' | 'feed-laporan' | 'rekap-laporan' | 'absensi';
@@ -216,7 +219,10 @@ export default function GuruDashboard({
   onRefreshData,
   currentRole = 'guru',
   attendance,
-  onSaveAttendance
+  onSaveAttendance,
+  pins = { admin_l: '1111', admin_p: '2222', guru: '9999' },
+  onUpdatePins,
+  onLogout
 }: GuruDashboardProps) {
   const [activeTab, setActiveTab] = useState<TabType>(() => {
     if (currentRole === 'admin_l' || currentRole === 'admin_p') {
@@ -224,6 +230,18 @@ export default function GuruDashboard({
     }
     return 'dashboard';
   });
+
+  // PIN management states
+  const [adminLPin, setAdminLPin] = useState(pins.admin_l);
+  const [adminPPin, setAdminPPin] = useState(pins.admin_p);
+  const [guruPin, setGuruPin] = useState(pins.guru);
+  const [pinChangeSuccess, setPinChangeSuccess] = useState(false);
+
+  useEffect(() => {
+    setAdminLPin(pins.admin_l);
+    setAdminPPin(pins.admin_p);
+    setGuruPin(pins.guru);
+  }, [pins]);
 
   // Role based filtering
   const displaySantriList = useMemo(() => {
@@ -865,15 +883,29 @@ export default function GuruDashboard({
           </button>
         </div>
 
-        {/* Quick Refresh Icon Button */}
-        <button
-          type="button"
-          onClick={onRefreshData}
-          className="p-2 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition-all"
-          title="Sinkronisasi Ulang Data"
-        >
-          <RefreshCw className="w-4 h-4" />
-        </button>
+        {/* Quick Refresh Icon Button and Contextual Logout */}
+        <div className="flex items-center gap-2">
+          <button
+            type="button"
+            onClick={onRefreshData}
+            className="p-2 text-slate-400 hover:text-emerald-700 hover:bg-emerald-50 rounded-lg transition-all flex items-center justify-center"
+            title="Sinkronisasi Ulang Data"
+          >
+            <RefreshCw className="w-4 h-4" />
+          </button>
+          
+          {onLogout && (
+            <button
+              type="button"
+              onClick={onLogout}
+              className="py-1.5 px-3 bg-red-50 text-red-600 hover:bg-red-100 hover:text-red-700 rounded-xl transition-all flex items-center gap-1.5 text-xs font-black border border-red-200/40 cursor-pointer active:scale-95"
+              title="Keluar / Logout Sesi Pengelola"
+            >
+              <Lock className="w-3.5 h-3.5" />
+              Keluar Sesi
+            </button>
+          )}
+        </div>
       </div>
 
       {/* Main Tab Render Switcher */}
@@ -1050,6 +1082,102 @@ export default function GuruDashboard({
                 </div>
               </div>
 
+            </div>
+
+            {/* PIN Settings Section (Guru Ngaji ONLY) */}
+            <div className="bg-white p-6 rounded-3xl border border-slate-200/60 shadow-xs space-y-4">
+              <div className="flex items-center justify-between border-b border-slate-100 pb-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-xl">🔐</span>
+                  <div>
+                    <h3 className="text-sm font-extrabold text-slate-800">
+                      Pusat Pengaturan PIN Pengaman Akses Pengelola
+                    </h3>
+                    <p className="text-[10px] text-slate-400 font-medium">Atur PIN masuk untuk Admin Laki-laki, Admin Perempuan, dan Guru Ngaji</p>
+                  </div>
+                </div>
+                <span className="text-[10px] bg-red-50 text-red-700 font-bold px-2 py-0.5 rounded-full border border-red-100">
+                  Guru Ngaji Only
+                </span>
+              </div>
+
+              {pinChangeSuccess && (
+                <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 p-3 rounded-2xl text-xs font-semibold flex items-center gap-2">
+                  <Check className="w-4 h-4 text-emerald-600" />
+                  <span>Alhamdulillah, PIN pengaman pengelola berhasil diperbarui di Cloud Firestore!</span>
+                </div>
+              )}
+
+              <form 
+                onSubmit={(e) => {
+                  e.preventDefault();
+                  if (adminLPin.length !== 4 || adminPPin.length !== 4 || guruPin.length !== 4) {
+                    alert('Semua PIN harus terdiri dari tepat 4 angka!');
+                    return;
+                  }
+                  if (onUpdatePins) {
+                    onUpdatePins({
+                      admin_l: adminLPin,
+                      admin_p: adminPPin,
+                      guru: guruPin
+                    });
+                    setPinChangeSuccess(true);
+                    setTimeout(() => setPinChangeSuccess(false), 5000);
+                  }
+                }}
+                className="grid grid-cols-1 md:grid-cols-3 gap-5 items-end"
+              >
+                <div className="space-y-1.5">
+                  <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
+                    PIN Admin Laki-laki (L)
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={4}
+                    value={adminLPin}
+                    onChange={(e) => setAdminLPin(e.target.value.replace(/\D/g, ''))}
+                    placeholder="1111"
+                    className="w-full text-center text-sm font-extrabold tracking-widest p-2 border border-slate-200 bg-slate-50/50 rounded-xl focus:outline-emerald-500"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1">
+                    PIN Admin Perempuan (P)
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={4}
+                    value={adminPPin}
+                    onChange={(e) => setAdminPPin(e.target.value.replace(/\D/g, ''))}
+                    placeholder="2222"
+                    className="w-full text-center text-sm font-extrabold tracking-widest p-2 border border-slate-200 bg-slate-50/50 rounded-xl focus:outline-emerald-500"
+                  />
+                </div>
+
+                <div className="space-y-1.5">
+                  <label className="text-[11px] font-bold text-slate-600 flex items-center gap-1 text-amber-700">
+                    PIN Guru Ngaji (Super Admin)
+                  </label>
+                  <input
+                    type="text"
+                    maxLength={4}
+                    value={guruPin}
+                    onChange={(e) => setGuruPin(e.target.value.replace(/\D/g, ''))}
+                    placeholder="9999"
+                    className="w-full text-center text-sm font-extrabold tracking-widest p-2 border border-slate-200 bg-amber-50/20 rounded-xl focus:outline-amber-500"
+                  />
+                </div>
+
+                <div className="md:col-span-3 flex justify-end pt-2">
+                  <button
+                    type="submit"
+                    className="py-2.5 px-5 bg-emerald-600 hover:bg-emerald-700 text-white text-xs font-bold rounded-xl shadow-xs transition-colors flex items-center gap-1.5"
+                  >
+                    <Check className="w-4 h-4" /> Simpan Perubahan PIN
+                  </button>
+                </div>
+              </form>
             </div>
           </motion.div>
         )}

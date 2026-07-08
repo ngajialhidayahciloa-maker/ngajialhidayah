@@ -6,6 +6,7 @@ import {
   doc, 
   setDoc, 
   deleteDoc, 
+  getDoc,
   writeBatch 
 } from 'firebase/firestore';
 import { Santri, Report, Attendance } from './types';
@@ -127,5 +128,27 @@ export async function seedInitialData(
     console.log("Seeding initial data successfully completed!");
   } catch (error) {
     console.error("Error seeding initial data to Firestore:", error);
+  }
+}
+
+export async function getPinsFromFirestore(): Promise<{ admin_l: string; admin_p: string; guru: string } | null> {
+  try {
+    const docRef = doc(db, 'settings', 'pins');
+    const docSnap = await getDoc(docRef);
+    if (docSnap.exists()) {
+      return docSnap.data() as { admin_l: string; admin_p: string; guru: string };
+    }
+    return null;
+  } catch (error) {
+    console.error("Error loading PINs from Firestore:", error);
+    return null;
+  }
+}
+
+export async function savePinsToFirestore(pins: { admin_l: string; admin_p: string; guru: string }): Promise<void> {
+  try {
+    await setDoc(doc(db, 'settings', 'pins'), pins);
+  } catch (error) {
+    console.error("Error saving PINs to Firestore:", error);
   }
 }
