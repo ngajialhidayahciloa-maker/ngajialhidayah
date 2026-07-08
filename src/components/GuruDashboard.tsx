@@ -7,20 +7,22 @@ import {
   PlusCircle, Filter, Download, Plus, Star, Moon, Clock,
   Edit, Trash2, Lock
 } from 'lucide-react';
-import { Santri, Report, ShalatStatus } from '../types';
+import { Santri, Report, ShalatStatus, Attendance } from '../types';
 
 interface GuruDashboardProps {
   reports: Report[];
   santriList: Santri[];
   onVerifyReport: (reportId: string, feedback: string, verifiedBy?: string) => void;
-  onAddSantri: (name: string, className: string, pin: string, gender: 'L' | 'P') => Santri;
+  onAddSantri: (name: string, className: string, pin: string, gender: 'L' | 'P', phone?: string) => Santri;
   onUpdateSantri: (id: string, updatedFields: Partial<Santri>) => void;
   onDeleteSantri: (id: string) => void;
   onRefreshData?: () => void;
   currentRole?: 'guru' | 'admin_l' | 'admin_p';
+  attendance: Attendance[];
+  onSaveAttendance: (attendance: Attendance[]) => void;
 }
 
-type TabType = 'dashboard' | 'add-santri' | 'feed-laporan' | 'rekap-laporan';
+type TabType = 'dashboard' | 'add-santri' | 'feed-laporan' | 'rekap-laporan' | 'absensi';
 
 const checkTimeValidity = (key: string, enteredTime?: string): { isValid: boolean; range: string; msg: string } => {
   if (!enteredTime || enteredTime === 'Selesai') return { isValid: true, range: '', msg: '' };
@@ -82,6 +84,128 @@ const checkTimeValidity = (key: string, enteredTime?: string): { isValid: boolea
   };
 };
 
+const parseTimeStr = (str?: string): { hour: number; minute: number } | null => {
+  if (!str) return null;
+  const cleaned = str.replace(/[^\d:.]/g, '').trim();
+  const parts = cleaned.split(/[:.]/);
+  if (parts.length < 2) return null;
+  const h = parseInt(parts[0], 10);
+  const m = parseInt(parts[1], 10);
+  if (isNaN(h) || isNaN(m)) return null;
+  return { hour: h, minute: m };
+};
+
+export interface AnalysisFinding {
+  type: 'tidak_shalat_tanpa_alasan' | 'tidak_shalat_dengan_alasan' | 'terlambat' | 'manipulasi_waktu' | 'sunnah_lewat';
+  severity: 'error' | 'warning' | 'info';
+  message: string;
+}
+
+const getReportAnalysis = (report: Report): { findings: AnalysisFinding[]; score: number } => {
+  const findings: AnalysisFinding[] = [];
+  let score = 100;
+
+  const prayers: Array<{ key: 'subuh' | 'dzuhur' | 'ashar' | 'maghrib' | 'isya'; name: string }> = [
+    { key: 'subuh', name: 'Subuh' },
+    { key: 'dzuhur', name: 'Dzuhur' },
+    { key: 'ashar', name: 'Ashar' },
+    { key: 'maghrib', name: 'Maghrib' },
+    { key: 'isya', name: 'Isya' },
+  ];
+
+  prayers.forEach(({ key, name }) => {
+    const detail = report.shalat[key];
+    if (!detail) return;
+
+    if (!detail.performed) {
+      if (detail.excuse) {
+        findings.push({
+          type: 'tidak_shalat_dengan_alasan',
+          severity: 'warning',
+          message: `Tidak shalat ${name} karena ${detail.excuse}.`
+        });
+        if (!detail.excuse.includes("Haid")) {
+          score -= 10;
+        }
+      } else {
+        findings.push({
+          type: 'tidak_shalat_tanpa_alasan',
+          severity: 'error',
+          message: `Tidak shalat ${name} tanpa keterangan.`
+        });
+        score -= 20;
+      }
+    } else {
+      // Performed. Check validity of time
+      const validity = checkTimeValidity(key, detail.time);
+      if (!validity.isValid && detail.time) {
+        findings.push({
+          type: 'terlambat',
+          severity: 'warning',
+          message: `Shalat ${name} terlambat: diisi pukul ${detail.time} (${validity.msg}).`
+        });
+        score -= 5;
+      }
+
+      // Check time discrepancy (manipulasi waktu)
+      if (detail.time && detail.inputTimestamp) {
+        const entered = parseTimeStr(detail.time);
+        const input = parseTimeStr(detail.inputTimestamp);
+        if (entered && input) {
+          const enteredMin = entered.hour * 60 + entered.minute;
+          const inputMin = input.hour * 60 + input.minute;
+          // If entered time of prayer is after parent's submission/logging timestamp by more than 5 minutes
+          if (enteredMin > inputMin + 5) {
+            findings.push({
+              type: 'manipulasi_waktu',
+              severity: 'error',
+              message: `Indikasi selisih waktu: Shalat ${name} diisi pukul ${detail.time}, tetapi tercatat disubmit lebih awal pukul ${detail.inputTimestamp}.`
+            });
+            score -= 15;
+          }
+        }
+      }
+    }
+  });
+
+  // Check Sunnah & Devotions
+  if (!report.tahajud) {
+    findings.push({
+      type: 'sunnah_lewat',
+      severity: 'info',
+      message: 'Tidak melaksanakan shalat Tahajud.'
+    });
+    score -= 3;
+  }
+  if (!report.witir) {
+    findings.push({
+      type: 'sunnah_lewat',
+      severity: 'info',
+      message: 'Tidak melaksanakan shalat Witir.'
+    });
+    score -= 3;
+  }
+  if (!report.zikir) {
+    findings.push({
+      type: 'sunnah_lewat',
+      severity: 'info',
+      message: 'Tidak berzikir harian.'
+    });
+    score -= 3;
+  }
+  if (!report.bantuOrangTua?.checked) {
+    findings.push({
+      type: 'sunnah_lewat',
+      severity: 'info',
+      message: 'Tidak berbakti membantu orang tua.'
+    });
+    score -= 3;
+  }
+
+  score = Math.max(0, score);
+  return { findings, score };
+};
+
 export default function GuruDashboard({ 
   reports, 
   santriList, 
@@ -90,7 +214,9 @@ export default function GuruDashboard({
   onUpdateSantri,
   onDeleteSantri,
   onRefreshData,
-  currentRole = 'guru'
+  currentRole = 'guru',
+  attendance,
+  onSaveAttendance
 }: GuruDashboardProps) {
   const [activeTab, setActiveTab] = useState<TabType>(() => {
     if (currentRole === 'admin_l' || currentRole === 'admin_p') {
@@ -123,25 +249,80 @@ export default function GuruDashboard({
 
   const [newStudentGender, setNewStudentGender] = useState<'L' | 'P'>('L');
   const [editGender, setEditGender] = useState<'L' | 'P'>('L');
+  const [newStudentPhone, setNewStudentPhone] = useState('');
+  const [editPhone, setEditPhone] = useState('');
+
+  // Weekly Masjid behavior recap states
+  const [weeklyRecapStudentId, setWeeklyRecapStudentId] = useState<string | null>(null);
+  const [tempWeeklyRecap, setTempWeeklyRecap] = useState('');
+  const [showWeeklyRecapModal, setShowWeeklyRecapModal] = useState(false);
 
   React.useEffect(() => {
     if (currentRole === 'admin_l') {
       setNewStudentGender('L');
-      if (activeTab === 'dashboard') {
-        setActiveTab('feed-laporan');
-      }
+      setActiveTab(prev => prev === 'dashboard' ? 'feed-laporan' : prev);
     } else if (currentRole === 'admin_p') {
       setNewStudentGender('P');
-      if (activeTab === 'dashboard') {
-        setActiveTab('feed-laporan');
-      }
+      setActiveTab(prev => prev === 'dashboard' ? 'feed-laporan' : prev);
     }
-  }, [currentRole, activeTab]);
+  }, [currentRole]);
   const [selectedReport, setSelectedReport] = useState<Report | null>(null);
+
+  // Attendance (Absensi) States
+  const [attendanceDate, setAttendanceDate] = useState(() => new Date().toISOString().split('T')[0]);
+  const [genderFilter, setGenderFilter] = useState<'all' | 'L' | 'P'>('all');
   
   // Search and Filter States
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<'all' | 'pending' | 'verified'>('all');
+
+  // Audit Analysis Panel States
+  const [showAnalysisPanel, setShowAnalysisPanel] = useState(true);
+  const [analysisFilter, setAnalysisFilter] = useState<'all' | 'perfect' | 'issues'>('all');
+  const [selectedAnalysisStudentId, setSelectedAnalysisStudentId] = useState<string | null>(null);
+
+  const santriAnalysisData = useMemo(() => {
+    return displaySantriList.map(santri => {
+      // Get all verified reports for this student
+      const verifiedReports = displayReports.filter(r => r.santriId === santri.id && r.status === 'verified');
+      
+      if (verifiedReports.length === 0) {
+        return {
+          santri,
+          hasData: false,
+          latestScore: 0,
+          latestFindings: [],
+          allReportsAnalysis: [],
+          averageScore: 0,
+          totalVerified: 0
+        };
+      }
+
+      // Sort reports by date descending
+      const sortedVerified = [...verifiedReports].sort((a, b) => new Date(b.date).getTime() - new Date(a.date).getTime());
+      
+      const allReportsAnalysis = sortedVerified.map(report => {
+        const { findings, score } = getReportAnalysis(report);
+        return {
+          report,
+          findings,
+          score
+        };
+      });
+
+      const latestAnalysis = allReportsAnalysis[0];
+
+      return {
+        santri,
+        hasData: true,
+        latestScore: latestAnalysis.score,
+        latestFindings: latestAnalysis.findings,
+        allReportsAnalysis,
+        averageScore: Math.round(allReportsAnalysis.reduce((sum, item) => sum + item.score, 0) / allReportsAnalysis.length),
+        totalVerified: verifiedReports.length
+      };
+    });
+  }, [displaySantriList, displayReports]);
   
   // New Student Form States
   const [newStudentName, setNewStudentName] = useState('');
@@ -214,6 +395,55 @@ export default function GuruDashboard({
     ? Math.round((todayReportsCount / displaySantriList.length) * 100)
     : 0;
 
+  // Handle sending formatted WhatsApp report audit
+  const handleSendWhatsApp = (report: Report) => {
+    // Find student to get their phone number
+    const student = santriList.find(s => s.id === report.santriId);
+    const phone = student?.phone ? student.phone.replace(/\D/g, '') : '';
+    
+    // Evaluate prayer list
+    const prayersCount = Object.values(report.shalat).filter((p: any) => {
+      if (typeof p === 'boolean') return p;
+      return p && p.performed;
+    }).length;
+    
+    const reading = report.quran.type === 'quran' 
+      ? `Al-Qur'an Surah ${report.quran.surahOrJilid} (${report.quran.ayatOrHalaman})`
+      : `Iqro' ${report.quran.surahOrJilid} (Halaman ${report.quran.ayatOrHalaman})`;
+      
+    const parentalApreciation = report.bantuOrangTua.checked 
+      ? `\n- Bantu Orang Tua: Ya ("${report.bantuOrangTua.description}")` 
+      : '\n- Bantu Orang Tua: Tidak/Belum';
+
+    const findingsObj = getReportAnalysis(report);
+    const findingsStr = findingsObj.findings.length > 0 
+      ? `\n\n📌 *Catatan Temuan Audit:* \n` + findingsObj.findings.map(f => `• ${f.message}`).join('\n')
+      : '\n\n✅ *Hasil Audit:* Sangat Sempurna (Tidak ada temuan ganjil).';
+
+    const feedbackText = report.feedback || manualFeedback || "Laporan harian terpantau lancar.";
+
+    const waText = 
+      `Assalamu'alaikum Warahmatullahi Wabarakaatuh,\n\n` +
+      `Berikut adalah *Laporan Harian & Audit Ibadah Santri* dari Al-Hidayah Digital:\n\n` +
+      `👤 *Nama Santri:* ${report.santriName}\n` +
+      `📅 *Tanggal:* ${report.date}\n` +
+      `🕌 *Shalat 5 Waktu:* ${prayersCount}/5 Waktu\n` +
+      `📖 *Bacaan Mengaji:* ${reading}` +
+      `${parentalApreciation}` +
+      `\n⭐ *Skor Audit Ibadah:* ${findingsObj.score}/100` +
+      `${findingsStr}\n\n` +
+      `💬 *Ulasan / Feedback Guru:* \n"${feedbackText}"\n\n` +
+      `_Semoga putra/putri kita selalu istiqomah dalam ibadah dan belajar Al-Qur'an._\n` +
+      `Al-Hidayah Digital`;
+
+    const encodedText = encodeURIComponent(waText);
+    const url = phone 
+      ? `https://wa.me/${phone}?text=${encodedText}`
+      : `https://wa.me/?text=${encodedText}`;
+      
+    window.open(url, '_blank');
+  };
+
   // Handle registering a new student
   const handleRegisterStudentSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -224,8 +454,8 @@ export default function GuruDashboard({
       ? (customNewClass.trim() || 'Umum')
       : newStudentClass;
     
-    // Register the student with the specified PIN and gender
-    const created = onAddSantri(newStudentName.trim(), finalClass, newStudentPin, newStudentGender);
+    // Register the student with the specified PIN, gender, and phone
+    const created = onAddSantri(newStudentName.trim(), finalClass, newStudentPin, newStudentGender, newStudentPhone.trim());
     
     // Override standard avatar choice if the user picked a custom one (we can update state dynamically)
     const localSantri = localStorage.getItem('laporan_santri_profiles');
@@ -233,7 +463,7 @@ export default function GuruDashboard({
       const parsed: Santri[] = JSON.parse(localSantri);
       const updated = parsed.map(s => {
         if (s.id === created.id) {
-          return { ...s, avatar: selectedAvatar };
+          return { ...s, avatar: selectedAvatar, phone: newStudentPhone.trim() };
         }
         return s;
       });
@@ -244,6 +474,7 @@ export default function GuruDashboard({
 
     setRegisteredName(newStudentName.trim());
     setNewStudentName('');
+    setNewStudentPhone('');
     setNewStudentClass('Iqro 3');
     setCustomNewClass('');
     setNewStudentPin(Math.floor(1000 + Math.random() * 9000).toString());
@@ -271,9 +502,11 @@ export default function GuruDashboard({
       pin: editPin,
       avatar: editAvatar,
       gender: editGender,
+      phone: editPhone.trim(),
     });
     setEditingStudent(null);
     setCustomEditClass('');
+    setEditPhone('');
   };
 
   // AI Evaluation API Proxy Call
@@ -379,6 +612,180 @@ export default function GuruDashboard({
     alert('Alhamdulillah! Rekap laporan santri berhasil diekspor ke format cetak PDF / Excel (Simulasi).');
   };
 
+  // Memoized lists and helper functions for Absensi (Attendance)
+  const absensiStudents = useMemo(() => {
+    let list = santriList;
+    if (currentRole === 'admin_l') {
+      list = santriList.filter(s => s.gender === 'L');
+    } else if (currentRole === 'admin_p') {
+      list = santriList.filter(s => s.gender === 'P');
+    } else {
+      if (genderFilter !== 'all') {
+        list = santriList.filter(s => s.gender === genderFilter);
+      }
+    }
+    if (searchQuery.trim()) {
+      list = list.filter(s => s.name.toLowerCase().includes(searchQuery.toLowerCase()));
+    }
+    return list;
+  }, [santriList, currentRole, genderFilter, searchQuery]);
+
+  const handleMarkAttendance = (santriId: string, status: 'hadir' | 'sakit' | 'izin' | 'alpa' | 'haid') => {
+    let updated = [...(attendance || [])];
+    const existingIndex = updated.findIndex(a => a.santriId === santriId && a.date === attendanceDate);
+    
+    if (status === 'hadir') {
+      if (existingIndex > -1) {
+        updated.splice(existingIndex, 1);
+      }
+    } else {
+      if (existingIndex > -1) {
+        updated[existingIndex] = { ...updated[existingIndex], status };
+      } else {
+        updated.push({
+          id: `att_${santriId}_${attendanceDate}_${Date.now()}`,
+          date: attendanceDate,
+          santriId,
+          status
+        });
+      }
+    }
+    onSaveAttendance(updated);
+  };
+
+  const handleMarkAllHadir = () => {
+    let updated = [...(attendance || [])];
+    const studentIds = absensiStudents.map(s => s.id);
+    updated = updated.filter(a => !(a.date === attendanceDate && studentIds.includes(a.santriId)));
+    onSaveAttendance(updated);
+  };
+
+  // Weekly WhatsApp summary and mosque recap dispatcher
+  const handleSendWeeklyWhatsApp = (santriId: string, customRecap: string) => {
+    const student = santriList.find(s => s.id === santriId);
+    if (!student) return;
+
+    // Filter reports for this student in the last 7 days
+    const oneWeekAgo = new Date();
+    oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+    const oneWeekAgoStr = oneWeekAgo.toISOString().split('T')[0];
+
+    const studentReports = reports
+      .filter(r => r.santriId === santriId && r.date >= oneWeekAgoStr)
+      .sort((a, b) => b.date.localeCompare(a.date));
+
+    // Fallback if no reports in last 7 days, just take the last 5 reports overall
+    const weeklyReports = studentReports.length > 0 
+      ? studentReports 
+      : reports.filter(r => r.santriId === santriId).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+
+    const totalReports = weeklyReports.length;
+
+    let totalDoneShalat = 0;
+    let totalTahajud = 0;
+    let totalBakti = 0;
+    const baktiDescriptions: string[] = [];
+
+    weeklyReports.forEach(r => {
+      // Shalat
+      if (typeof r.shalat.subuh === 'boolean' ? r.shalat.subuh : r.shalat.subuh?.performed) totalDoneShalat++;
+      if (typeof r.shalat.dzuhur === 'boolean' ? r.shalat.dzuhur : r.shalat.dzuhur?.performed) totalDoneShalat++;
+      if (typeof r.shalat.ashar === 'boolean' ? r.shalat.ashar : r.shalat.ashar?.performed) totalDoneShalat++;
+      if (typeof r.shalat.maghrib === 'boolean' ? r.shalat.maghrib : r.shalat.maghrib?.performed) totalDoneShalat++;
+      if (typeof r.shalat.isya === 'boolean' ? r.shalat.isya : r.shalat.isya?.performed) totalDoneShalat++;
+
+      // Tahajud
+      if (r.tahajud) totalTahajud++;
+
+      // Bakti
+      if (r.bantuOrangTua.checked) {
+        totalBakti++;
+        if (r.bantuOrangTua.description && !baktiDescriptions.includes(r.bantuOrangTua.description)) {
+          baktiDescriptions.push(r.bantuOrangTua.description);
+        }
+      }
+    });
+
+    const averagePrayerPct = totalReports > 0 ? Math.round((totalDoneShalat / (totalReports * 5)) * 100) : 0;
+
+    // Get last reading progress
+    const latestReport = weeklyReports[0];
+    const readingStr = latestReport
+      ? `${latestReport.quran.type === 'quran' ? "Al-Qur'an" : "Iqro'"} ${latestReport.quran.surahOrJilid} (${latestReport.quran.ayatOrHalaman})`
+      : 'Belum melapor';
+
+    const feedbackText = customRecap.trim() || student.weeklyRecap || 'Ananda mengaji di masjid dengan tertib, aktif, dan menyimak pelajaran dengan fokus.';
+
+    // Calculate attendance for this student in the last 7 days
+    let cntHadir = 0;
+    let cntSakit = 0;
+    let cntIzin = 0;
+    let cntAlpa = 0;
+    let cntHaid = 0;
+    
+    for (let i = 0; i < 7; i++) {
+      const d = new Date();
+      d.setDate(d.getDate() - i);
+      const dStr = d.toISOString().split('T')[0];
+      const attRecord = (attendance || []).find(a => a.santriId === santriId && a.date === dStr);
+      if (attRecord) {
+        if (attRecord.status === 'sakit') cntSakit++;
+        else if (attRecord.status === 'izin') cntIzin++;
+        else if (attRecord.status === 'alpa') cntAlpa++;
+        else if (attRecord.status === 'haid') cntHaid++;
+        else cntHadir++;
+      } else {
+        cntHadir++;
+      }
+    }
+
+    let attendanceSummaryStr = `• *Kehadiran di Masjid:* ${cntHadir} Hadir, ${cntSakit} Sakit, ${cntIzin} Izin, ${cntAlpa} Alpa`;
+    if (student.gender === 'P' && cntHaid > 0) {
+      attendanceSummaryStr += `, ${cntHaid} Haid`;
+    }
+    attendanceSummaryStr += `\n`;
+
+    const waMessage = 
+      `Assalamu'alaikum Warahmatullahi Wabarakaatuh,\n\n` +
+      `Berikut adalah *RANGKUMAN MINGGUAN Kegiatan & Audit Ibadah Santri* dari Al-Hidayah Digital:\n\n` +
+      `👤 *Nama Santri:* ${student.name}\n` +
+      `🏫 *Tingkat/Kelas:* ${student.class}\n` +
+      `📊 *Keaktifan Lapor:* ${totalReports} Hari Melapor (7 Hari Terakhir)\n\n` +
+      `🕌 *RANGKUMAN IBADAH DI RUMAH (7 Hari Terakhir):*\n` +
+      `• *Kedisiplinan Shalat 5 Waktu:* ${totalDoneShalat}/${totalReports * 5} Shalat Terjaga (${averagePrayerPct}% Kepatuhan)\n` +
+      `• *Shalat Tahajud:* ${totalTahajud} Kali Terlaksana\n` +
+      `• *Bacaan Ngaji Terakhir:* ${readingStr}\n` +
+      `• *Berbakti Ke Orang Tua:* ${totalBakti} Kali\n` +
+      (baktiDescriptions.length > 0 ? `  _(Kebaikan: ${baktiDescriptions.slice(0, 2).join(', ')})_\n` : '') +
+      `\n` +
+      `🕌 *ABSENSI MASJID (7 Hari Terakhir):*\n` +
+      attendanceSummaryStr +
+      `\n` +
+      `🕌 *CATATAN KEADAAN MENGAJI DI MESJID (Tulis Admin/Ustadz):*\n` +
+      `"${feedbackText}"\n\n` +
+      `🔑 *PANDUAN LOGIN KEMBALI & LAYANAN MANDIRI:* \n` +
+      `Bapak/Ibu Orang Tua Wali dapat masuk ke aplikasi Al-Hidayah Digital untuk mengisi laporan harian baru, memantau riwayat, serta memberikan tanggapan balasan langsung ke Guru Ngaji.\n` +
+      `👉 *Masuk ke Aplikasi:* https://al-hidayah.digital/\n` +
+      `🔑 *PIN Anda:* *${student.pin || '1234'}*\n\n` +
+      `_Semoga Bapak/Ibu Wali Santri selalu diridhoi Allah dan ananda terus istiqomah belajar serta beribadah._\n\n` +
+      `Jazakumullahu Khairan,\n` +
+      `*Pengurus Mesjid Al-Hidayah Digital*`;
+
+    const encoded = encodeURIComponent(waMessage);
+    const phone = student.phone ? student.phone.replace(/[^\d]/g, '') : '';
+    const url = phone ? `https://wa.me/${phone}?text=${encoded}` : `https://wa.me/?text=${encoded}`;
+    
+    // Trigger onUpdateSantri to persist the recap on the student profile
+    onUpdateSantri(santriId, {
+      guruMosqueNote: feedbackText,
+      guruMosqueNoteUpdatedAt: new Date().toISOString(),
+      weeklyRecap: feedbackText,
+      weeklyRecapUpdatedAt: new Date().toISOString()
+    });
+
+    window.open(url, '_blank');
+  };
+
   return (
     <div className="w-full max-w-5xl mx-auto space-y-6">
       
@@ -443,6 +850,19 @@ export default function GuruDashboard({
           >
             <Users className="w-4 h-4" /> Rekap Laporan
           </button>
+
+          <button
+            type="button"
+            onClick={() => setActiveTab('absensi')}
+            className={`py-2 px-3.5 rounded-xl text-xs font-bold transition-all flex items-center gap-1.5 ${
+              activeTab === 'absensi' 
+                ? 'bg-emerald-600 text-white shadow-sm' 
+                : 'text-slate-600 hover:text-slate-900 hover:bg-slate-50'
+            }`}
+            id="tab-guru-absensi"
+          >
+            <Calendar className="w-4 h-4" /> Absensi Masjid
+          </button>
         </div>
 
         {/* Quick Refresh Icon Button */}
@@ -460,7 +880,7 @@ export default function GuruDashboard({
       <AnimatePresence mode="wait">
         
         {/* 1. DASBOR INFORMATIF TAB */}
-        {activeTab === 'dashboard' && (
+        {activeTab === 'dashboard' && currentRole === 'guru' && (
           <motion.div
             key="dashboard-view"
             initial={{ opacity: 0, y: 10 }}
@@ -761,6 +1181,20 @@ export default function GuruDashboard({
                     )}
                   </div>
 
+                  {/* Nomor WhatsApp Orang Tua */}
+                  <div>
+                    <label className="text-[11px] font-bold text-slate-500 uppercase block mb-1.5">No. WhatsApp Orang Tua (Format: 628xxx)</label>
+                    <input
+                      type="text"
+                      placeholder="Contoh: 628123456789"
+                      value={newStudentPhone}
+                      onChange={(e) => setNewStudentPhone(e.target.value.replace(/\D/g, ''))}
+                      className="w-full text-xs p-3 border border-slate-200 bg-slate-50 rounded-xl focus:outline-emerald-500 font-mono"
+                      id="add-student-phone-input"
+                    />
+                    <p className="text-[9px] text-slate-400 mt-1">Digunakan untuk mengirim notifikasi & rekap audit via WhatsApp secara otomatis.</p>
+                  </div>
+
                   {/* Password / PIN input */}
                   <div>
                     <label className="text-[11px] font-bold text-slate-500 uppercase block mb-1.5 flex justify-between items-center">
@@ -888,6 +1322,12 @@ export default function GuruDashboard({
                               </span>
                               <span>•</span>
                               <span className="text-amber-700 font-extrabold">🔥 {santri.streak} Streak</span>
+                              {santri.phone && (
+                                <>
+                                  <span>•</span>
+                                  <span className="text-blue-700 font-semibold bg-blue-50 border border-blue-100 px-1.5 py-0.2 rounded">📞 {santri.phone}</span>
+                                </>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -903,6 +1343,7 @@ export default function GuruDashboard({
                               setEditPin(santri.pin);
                               setEditAvatar(santri.avatar);
                               setEditGender(santri.gender || 'L');
+                              setEditPhone(santri.phone || '');
                             }}
                             className="p-2 bg-white hover:bg-emerald-50 hover:text-emerald-700 text-slate-500 rounded-xl border border-slate-200 transition-colors shadow-2xs"
                             title="Ubah Profil Santri"
@@ -1359,6 +1800,27 @@ export default function GuruDashboard({
                           )}
                         </div>
 
+                        {/* Parent Feedback Bubble (If any) */}
+                        {selectedReport.parentFeedback && (
+                          <div className={`p-3 rounded-2xl border text-left ${
+                            currentRole === 'guru' 
+                              ? 'bg-pink-50 border-pink-100 text-pink-800' 
+                              : 'bg-slate-50 border-slate-200 text-slate-600'
+                          } space-y-1`}>
+                            <p className="text-[9px] font-bold flex items-center gap-1 uppercase tracking-wider">
+                              💝 Tanggapan / Feedback Wali Santri {currentRole === 'guru' ? '(Terkirim Khusus ke Guru)' : '(Mode Admin)'}:
+                            </p>
+                            <p className="italic text-xs font-medium leading-relaxed">
+                              "{selectedReport.parentFeedback}"
+                            </p>
+                            {selectedReport.parentFeedbackSubmittedAt && (
+                              <p className="text-[8px] opacity-75 text-right font-mono">
+                                Dikirim: {new Date(selectedReport.parentFeedbackSubmittedAt).toLocaleString('id-ID', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })}
+                              </p>
+                            )}
+                          </div>
+                        )}
+
                       </div>
 
                       {/* AI Correction & Feedback Formulation */}
@@ -1406,6 +1868,35 @@ export default function GuruDashboard({
                             </span>
                           </div>
                         )}
+
+                        {/* WhatsApp Notification Share Trigger (Mode A) */}
+                        <div className="pt-2 border-t border-slate-100 mt-2">
+                          <button
+                            type="button"
+                            onClick={() => handleSendWhatsApp(selectedReport)}
+                            className="w-full py-2.5 bg-green-600 hover:bg-green-700 text-white font-extrabold rounded-xl text-xs flex items-center justify-center gap-2 transition-colors shadow-sm cursor-pointer"
+                            id="btn-send-wa"
+                          >
+                            <span className="text-sm">💬</span> 
+                            {(() => {
+                              const student = santriList.find(s => s.id === selectedReport.santriId);
+                              return student?.phone 
+                                ? `Kirim Laporan WA ke Ortu (${student.phone})`
+                                : `Kirim Laporan via WhatsApp (Kontak)`;
+                            })()}
+                          </button>
+                          {(() => {
+                            const student = santriList.find(s => s.id === selectedReport.santriId);
+                            if (!student?.phone) {
+                              return (
+                                <p className="text-[9px] text-slate-400 mt-1.5 text-center leading-normal">
+                                  💡 Orang tua belum menambahkan nomor WhatsApp. Sunting profilnya untuk menambahkan kontak agar terkirim otomatis ke nomornya.
+                                </p>
+                              );
+                            }
+                            return null;
+                          })()}
+                        </div>
                       </div>
                     </motion.div>
                   ) : (
@@ -1447,6 +1938,285 @@ export default function GuruDashboard({
               </button>
             </div>
 
+            {/* Collapsible Audit Analysis Panel */}
+            <div className="flex justify-end">
+              <button
+                type="button"
+                onClick={() => setShowAnalysisPanel(!showAnalysisPanel)}
+                className="text-xs font-extrabold text-emerald-700 hover:text-emerald-800 flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 hover:bg-emerald-100/60 rounded-xl border border-emerald-150 transition-all cursor-pointer shadow-2xs"
+              >
+                {showAnalysisPanel ? 'Sembunyikan Audit & Analisis' : 'Tampilkan Audit & Analisis Kepatuhan'}
+                <Sparkles className="w-3.5 h-3.5 text-amber-500" />
+              </button>
+            </div>
+
+            {showAnalysisPanel && (
+              <motion.div
+                initial={{ opacity: 0, height: 0 }}
+                animate={{ opacity: 1, height: 'auto' }}
+                exit={{ opacity: 0, height: 0 }}
+                className="bg-white rounded-3xl border border-slate-200/60 p-5 shadow-sm space-y-5 overflow-hidden"
+              >
+                {/* Section Header */}
+                <div className="flex items-center justify-between border-b border-slate-100 pb-2.5">
+                  <div className="flex items-center gap-2">
+                    <span className="text-xl">📊</span>
+                    <div>
+                      <h3 className="text-xs font-extrabold text-slate-800 flex items-center gap-1.5">
+                        Pusat Audit & Analisis Kepatuhan Ibadah Santri (Pasca-Verifikasi)
+                        <span className="bg-amber-500/10 text-amber-700 text-[8px] font-extrabold px-2 py-0.5 rounded-full uppercase tracking-wider">Deteksi Cerdas</span>
+                      </h3>
+                      <p className="text-[10px] text-slate-400 mt-0.5">Analisis otomatis atas kejujuran waktu, keterlambatan shalat, dan penyimpangan pengisian lapor.</p>
+                    </div>
+                  </div>
+                </div>
+
+                {/* KPI Overview Grid */}
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  {/* Card 1: Semua */}
+                  <div 
+                    onClick={() => setAnalysisFilter('all')}
+                    className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
+                      analysisFilter === 'all' 
+                        ? 'bg-emerald-50/40 border-emerald-500 ring-2 ring-emerald-500/10' 
+                        : 'bg-slate-50/50 border-slate-100 hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-slate-500 uppercase tracking-wider">Total Teranalisis</span>
+                      <span className="text-base">📋</span>
+                    </div>
+                    <div className="flex items-baseline gap-1 mt-1.5">
+                      <span className="text-xl font-extrabold text-slate-800">{santriAnalysisData.filter(d => d.hasData).length}</span>
+                      <span className="text-[9px] text-slate-400 font-bold">Santri</span>
+                    </div>
+                    <p className="text-[9px] text-slate-400 mt-0.5">Memiliki laporan terverifikasi</p>
+                  </div>
+
+                  {/* Card 2: Sempurna */}
+                  <div 
+                    onClick={() => setAnalysisFilter('perfect')}
+                    className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
+                      analysisFilter === 'perfect' 
+                        ? 'bg-emerald-500/5 border-emerald-500 ring-2 ring-emerald-500/10' 
+                        : 'bg-slate-50/50 border-slate-100 hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-emerald-600 uppercase tracking-wider">Ibadah Sempurna (100% Taat)</span>
+                      <span className="text-base">⭐</span>
+                    </div>
+                    <div className="flex items-baseline gap-1 mt-1.5">
+                      <span className="text-xl font-extrabold text-emerald-700">
+                        {santriAnalysisData.filter(d => d.hasData && d.latestFindings.filter(f => f.severity === 'error' || f.severity === 'warning').length === 0).length}
+                      </span>
+                      <span className="text-[9px] text-emerald-600 font-bold">Santri</span>
+                    </div>
+                    <p className="text-[9px] text-emerald-500 font-medium mt-0.5">Shalat lengkap, tepat waktu & jujur</p>
+                  </div>
+
+                  {/* Card 3: Perlu Bimbingan */}
+                  <div 
+                    onClick={() => setAnalysisFilter('issues')}
+                    className={`p-3.5 rounded-2xl border transition-all cursor-pointer ${
+                      analysisFilter === 'issues' 
+                        ? 'bg-amber-50/40 border-amber-500 ring-2 ring-amber-500/10' 
+                        : 'bg-slate-50/50 border-slate-100 hover:bg-slate-50'
+                    }`}
+                  >
+                    <div className="flex items-center justify-between">
+                      <span className="text-[10px] font-bold text-amber-700 uppercase tracking-wider">Butuh Bimbingan (Ada Temuan)</span>
+                      <span className="text-base">⚠️</span>
+                    </div>
+                    <div className="flex items-baseline gap-1 mt-1.5">
+                      <span className="text-xl font-extrabold text-amber-700">
+                        {santriAnalysisData.filter(d => d.hasData && d.latestFindings.filter(f => f.severity === 'error' || f.severity === 'warning').length > 0).length}
+                      </span>
+                      <span className="text-[9px] text-amber-700 font-bold">Santri</span>
+                    </div>
+                    <p className="text-[9px] text-amber-600 font-medium mt-0.5">Ada shalat terlewat, terlambat, atau janggal</p>
+                  </div>
+                </div>
+
+                {/* Sub-Layout: Student list on Left, Drilldown Details on Right */}
+                <div className="grid grid-cols-1 lg:grid-cols-12 gap-4 items-start">
+                  
+                  {/* Left: Analyzed Students List (span 5) */}
+                  <div className="lg:col-span-5 space-y-1.5 max-h-[300px] overflow-y-auto pr-1">
+                    <p className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">Pilih Santri Untuk Ulasan Audit:</p>
+                    
+                    {santriAnalysisData
+                      .filter(d => {
+                        if (analysisFilter === 'perfect') {
+                          return d.hasData && d.latestFindings.filter(f => f.severity === 'error' || f.severity === 'warning').length === 0;
+                        }
+                        if (analysisFilter === 'issues') {
+                          return d.hasData && d.latestFindings.filter(f => f.severity === 'error' || f.severity === 'warning').length > 0;
+                        }
+                        return d.hasData;
+                      })
+                      .map((data) => {
+                        const isSelected = selectedAnalysisStudentId === data.santri.id;
+                        const hasWarnings = data.latestFindings.filter(f => f.severity === 'error' || f.severity === 'warning').length > 0;
+                        
+                        return (
+                          <div
+                            key={data.santri.id}
+                            onClick={() => setSelectedAnalysisStudentId(isSelected ? null : data.santri.id)}
+                            className={`p-2.5 rounded-xl border text-xs cursor-pointer transition-all flex items-center justify-between ${
+                              isSelected 
+                                ? 'bg-emerald-600 text-white border-emerald-600 shadow-xs' 
+                                : 'bg-slate-50/50 border-slate-100 hover:bg-slate-50/80'
+                            }`}
+                          >
+                            <div className="flex items-center gap-2">
+                              <span className="text-base">{data.santri.avatar}</span>
+                              <div>
+                                <h4 className={`font-extrabold leading-none ${isSelected ? 'text-white' : 'text-slate-800'}`}>{data.santri.name}</h4>
+                                <p className={`text-[9px] mt-1 font-semibold ${isSelected ? 'text-emerald-100' : 'text-slate-400'}`}>{data.santri.class}</p>
+                              </div>
+                            </div>
+
+                            <div className="flex items-center gap-1.5">
+                              {hasWarnings ? (
+                                <span className={`text-[8px] font-extrabold px-1.5 py-0.5 rounded ${
+                                  isSelected ? 'bg-amber-400/20 text-amber-200 border border-amber-300/30' : 'bg-amber-50 text-amber-700 border border-amber-100'
+                                }`}>
+                                  ⚠️ Temuan
+                                </span>
+                              ) : (
+                                <span className={`text-[8px] font-extrabold px-1.5 py-0.5 rounded ${
+                                  isSelected ? 'bg-emerald-500/20 text-emerald-100 border border-emerald-400/30' : 'bg-emerald-50 text-emerald-700 border border-emerald-100'
+                                }`}>
+                                  ⭐ Sempurna
+                                </span>
+                              )}
+                              <span className={`text-[10px] font-bold ${isSelected ? 'text-white/80' : 'text-slate-400'}`}>
+                                ({data.totalVerified} lap)
+                              </span>
+                            </div>
+                          </div>
+                        );
+                      })}
+
+                    {santriAnalysisData.filter(d => {
+                      if (analysisFilter === 'perfect') {
+                        return d.hasData && d.latestFindings.filter(f => f.severity === 'error' || f.severity === 'warning').length === 0;
+                      }
+                      if (analysisFilter === 'issues') {
+                        return d.hasData && d.latestFindings.filter(f => f.severity === 'error' || f.severity === 'warning').length > 0;
+                      }
+                      return d.hasData;
+                    }).length === 0 && (
+                      <div className="py-8 text-center text-slate-400 bg-slate-50/30 rounded-2xl border border-dashed border-slate-150">
+                        <p className="text-[10px] font-semibold">Tidak ada data santri dalam kategori ini.</p>
+                      </div>
+                    )}
+                  </div>
+
+                  {/* Right: Selected Student Drilldown Analysis (span 7) */}
+                  <div className="lg:col-span-7 bg-slate-50/50 p-3.5 rounded-2xl border border-slate-150/40 min-h-[300px] max-h-[300px] overflow-y-auto">
+                    {selectedAnalysisStudentId ? (() => {
+                      const analysis = santriAnalysisData.find(d => d.santri.id === selectedAnalysisStudentId);
+                      if (!analysis || !analysis.hasData) return null;
+
+                      return (
+                        <div className="space-y-3.5">
+                          {/* Student Header */}
+                          <div className="flex items-center gap-2.5 border-b border-slate-200 pb-2">
+                            <span className="text-2xl bg-white p-1.5 rounded-xl border border-slate-150 shadow-2xs">{analysis.santri.avatar}</span>
+                            <div>
+                              <h4 className="font-extrabold text-slate-800 text-xs flex items-center gap-1.5">
+                                {analysis.santri.name}
+                                <span className="text-[8px] bg-slate-200 text-slate-600 px-1.5 py-0.5 rounded font-extrabold uppercase">
+                                  Rata-rata Skor: {analysis.averageScore}%
+                                </span>
+                              </h4>
+                              <p className="text-[9px] text-slate-400 font-bold mt-0.5">{analysis.santri.class} • Gender: {analysis.santri.gender === 'L' ? 'Laki-laki' : 'Perempuan'}</p>
+                            </div>
+                          </div>
+
+                          {/* Date-by-date Analysis List */}
+                          <div className="space-y-2">
+                            <p className="text-[9px] text-slate-400 font-bold uppercase tracking-wider">Histori Deteksi Ibadah Laporan Terverifikasi:</p>
+                            
+                            {analysis.allReportsAnalysis.map(({ report, findings, score }) => {
+                              const hasIssues = findings.filter(f => f.severity === 'error' || f.severity === 'warning').length > 0;
+                              
+                              return (
+                                <div key={report.id} className="bg-white p-3 rounded-xl border border-slate-200/50 space-y-1.5">
+                                  {/* Report Sub-Header */}
+                                  <div className="flex justify-between items-center border-b border-slate-100 pb-1 flex-wrap gap-1">
+                                    <span className="text-[10px] font-extrabold text-slate-700">
+                                      📅 {new Date(report.date).toLocaleDateString('id-ID', { weekday: 'short', day: 'numeric', month: 'short' })}
+                                    </span>
+                                    <div className="flex items-center gap-1.5">
+                                      <span className={`text-[8px] font-extrabold px-1.5 py-0.5 rounded-sm ${
+                                        score >= 90 ? 'bg-emerald-50 text-emerald-700 border border-emerald-100' : 'bg-amber-50 text-amber-700 border border-amber-100'
+                                      }`}>
+                                        Skor: {score}%
+                                      </span>
+                                      {hasIssues ? (
+                                        <span className="text-[8px] bg-red-50 text-red-600 px-1.5 py-0.5 rounded-sm font-extrabold border border-red-100">Ada Temuan</span>
+                                      ) : (
+                                        <span className="text-[8px] bg-emerald-50 text-emerald-600 px-1.5 py-0.5 rounded-sm font-extrabold border border-emerald-100">Sempurna</span>
+                                      )}
+                                      <button
+                                        type="button"
+                                        onClick={() => handleSendWhatsApp(report)}
+                                        className="text-[8px] bg-green-50 hover:bg-green-100 text-green-800 border border-green-150 px-1.5 py-0.5 rounded-sm font-extrabold flex items-center gap-0.5 transition-colors cursor-pointer"
+                                        title="Kirim Laporan Audit ke WhatsApp Orang Tua"
+                                      >
+                                        <span>💬 WA</span>
+                                      </button>
+                                    </div>
+                                  </div>
+
+                                  {/* Findings list */}
+                                  <div className="space-y-1">
+                                    {findings.map((finding, idx) => (
+                                      <div key={idx} className="flex items-start gap-1.5 text-[10px] leading-relaxed">
+                                        {finding.severity === 'error' ? (
+                                          <span className="text-red-500 mt-0.5 font-bold">❌</span>
+                                        ) : finding.severity === 'warning' ? (
+                                          <span className="text-amber-500 mt-0.5 font-bold">⚠️</span>
+                                        ) : (
+                                          <span className="text-blue-500 mt-0.5 font-bold">ℹ️</span>
+                                        )}
+                                        <span className={
+                                          finding.severity === 'error' ? 'text-red-700 font-bold' : 
+                                          finding.severity === 'warning' ? 'text-amber-700 font-semibold' : 
+                                          'text-slate-500 font-medium'
+                                        }>
+                                          {finding.message}
+                                        </span>
+                                      </div>
+                                    ))}
+                                    {findings.length === 0 && (
+                                      <p className="text-[10px] text-emerald-600 font-bold flex items-center gap-1">
+                                        ✨ Masya Allah! Laporan shalat, sunnah, zikir, dan bakti ananda sempurna tanpa cela.
+                                      </p>
+                                    )}
+                                  </div>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        </div>
+                      );
+                    })() : (
+                      <div className="h-full flex flex-col items-center justify-center text-center text-slate-400 py-12">
+                        <Info className="w-6 h-6 text-slate-300 mb-1.5" />
+                        <h4 className="font-bold text-xs">Belum Ada Santri Terpilih</h4>
+                        <p className="text-[9px] max-w-[180px] mx-auto mt-0.5">Pilih salah satu nama santri di daftar sebelah kiri untuk melihat detil temuan dan rekam kepatuhan ibadahnya secara otomatis.</p>
+                      </div>
+                    )}
+                  </div>
+
+                </div>
+              </motion.div>
+            )}
+
             {/* Table layout */}
             <div className="bg-white rounded-3xl border border-slate-200/60 overflow-hidden shadow-sm">
               <div className="overflow-x-auto">
@@ -1461,6 +2231,7 @@ export default function GuruDashboard({
                       <th className="py-3 px-4 text-center">Total Laporan</th>
                       <th className="py-3 px-4 text-center">Disiplin Shalat</th>
                       <th className="py-3 px-4">Bacaan Terakhir</th>
+                      <th className="py-3 px-4 text-center">Aksi Mingguan</th>
                     </tr>
                   </thead>
                   <tbody className="divide-y divide-slate-100 font-medium text-slate-700">
@@ -1543,14 +2314,380 @@ export default function GuruDashboard({
                               <span className="text-slate-300 italic">{lastRead}</span>
                             )}
                           </td>
+                          <td className="py-3.5 px-4 text-center">
+                            {currentRole === 'guru' ? (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setWeeklyRecapStudentId(santri.id);
+                                  setTempWeeklyRecap(santri.guruMosqueNote || santri.adminMosqueNote || santri.weeklyRecap || '');
+                                  setShowWeeklyRecapModal(true);
+                                }}
+                                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-extrabold flex items-center gap-1 mx-auto transition-all cursor-pointer shadow-3xs ${
+                                  santri.guruMosqueNote
+                                    ? 'bg-emerald-600 hover:bg-emerald-700 text-white border border-emerald-700'
+                                    : santri.adminMosqueNote
+                                      ? 'bg-amber-500 hover:bg-amber-600 text-white border border-amber-600 animate-pulse'
+                                      : 'bg-emerald-50 hover:bg-emerald-100 text-emerald-800 border border-emerald-150'
+                                }`}
+                                title={
+                                  santri.guruMosqueNote
+                                    ? 'Koreksi kembali catatan mengaji & kirim ke Orang Tua'
+                                    : santri.adminMosqueNote
+                                      ? 'Ada draf catatan dari Admin! Klik untuk review, koreksi & kirim ke Orang Tua'
+                                      : 'Tulis evaluasi mengaji santri & kirim ke Orang Tua'
+                                }
+                              >
+                                {santri.guruMosqueNote ? (
+                                  <><span>✍️</span> Edit Rekap</>
+                                ) : santri.adminMosqueNote ? (
+                                  <><span>📝</span> Koreksi Rekap</>
+                                ) : (
+                                  <><span>📝</span> Tulis Rekap</>
+                                )}
+                              </button>
+                            ) : (
+                              <button
+                                type="button"
+                                onClick={() => {
+                                  setWeeklyRecapStudentId(santri.id);
+                                  setTempWeeklyRecap(santri.adminMosqueNote || '');
+                                  setShowWeeklyRecapModal(true);
+                                }}
+                                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-extrabold flex items-center gap-1 mx-auto transition-all cursor-pointer shadow-3xs ${
+                                  santri.adminMosqueNote
+                                    ? 'bg-sky-600 hover:bg-sky-700 text-white border border-sky-700'
+                                    : 'bg-slate-100 hover:bg-slate-200 text-slate-700 border border-slate-200'
+                                }`}
+                                title={
+                                  santri.adminMosqueNote
+                                    ? 'Catatan mengaji sudah Anda tulis. Klik untuk mengedit.'
+                                    : 'Tulis catatan keadaan mengaji santri untuk Guru Ngaji'
+                                }
+                              >
+                                {santri.adminMosqueNote ? (
+                                  <><span>✍️</span> Edit Catatan</>
+                                ) : (
+                                  <><span>📝</span> Tulis Catatan</>
+                                )}
+                              </button>
+                            )}
+                          </td>
                         </tr>
                       );
                     })}
 
                     {displaySantriList.length === 0 && (
                       <tr>
-                        <td colSpan={8} className="py-12 text-center text-slate-400">
+                        <td colSpan={9} className="py-12 text-center text-slate-400">
                           Belum ada data santri terdaftar.
+                        </td>
+                      </tr>
+                    )}
+                  </tbody>
+                </table>
+              </div>
+            </div>
+          </motion.div>
+        )}
+
+        {/* 5. ABSENSI MASJID TAB */}
+        {activeTab === 'absensi' && (
+          <motion.div
+            key="absensi-view"
+            initial={{ opacity: 0, y: 10 }}
+            animate={{ opacity: 1, y: 0 }}
+            exit={{ opacity: 0, y: -10 }}
+            className="space-y-6 text-left"
+          >
+            {/* Header section with Date selection & batch actions */}
+            <div className="bg-white p-5 rounded-3xl border border-slate-200/60 shadow-xs flex flex-col md:flex-row md:items-center justify-between gap-4">
+              <div className="space-y-1">
+                <h3 className="text-sm font-extrabold text-slate-800 flex items-center gap-2">
+                  <Calendar className="w-5 h-5 text-emerald-600" />
+                  Presensi & Absensi Mengaji Masjid
+                </h3>
+                <p className="text-[11px] text-slate-400 font-bold">
+                  {currentRole === 'admin_l' && "Pencatatan Absensi Harian Santri Laki-laki"}
+                  {currentRole === 'admin_p' && "Pencatatan Absensi Harian Santri Perempuan"}
+                  {currentRole === 'guru' && "Pencatatan & Pemantauan Absensi Seluruh Santri"}
+                </p>
+              </div>
+
+              {/* Controls */}
+              <div className="flex flex-wrap items-center gap-3">
+                <div className="flex items-center gap-2">
+                  <span className="text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">Tanggal:</span>
+                  <input
+                    type="date"
+                    value={attendanceDate}
+                    onChange={(e) => setAttendanceDate(e.target.value)}
+                    className="text-xs p-2.5 border border-slate-200 bg-slate-50 rounded-xl focus:outline-emerald-500 font-semibold font-sans"
+                  />
+                </div>
+
+                {currentRole === 'guru' && (
+                  <div className="bg-slate-100 p-1 rounded-xl flex items-center gap-1">
+                    <button
+                      type="button"
+                      onClick={() => setGenderFilter('all')}
+                      className={`px-2.5 py-1 text-[10px] font-extrabold rounded-lg transition-all ${
+                        genderFilter === 'all' ? 'bg-white text-slate-800 shadow-3xs' : 'text-slate-500 hover:text-slate-700'
+                      }`}
+                    >
+                      Semua
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setGenderFilter('L')}
+                      className={`px-2.5 py-1 text-[10px] font-extrabold rounded-lg transition-all ${
+                        genderFilter === 'L' ? 'bg-white text-slate-800 shadow-3xs' : 'text-slate-500 hover:text-slate-700'
+                      }`}
+                    >
+                      Laki-laki
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setGenderFilter('P')}
+                      className={`px-2.5 py-1 text-[10px] font-extrabold rounded-lg transition-all ${
+                        genderFilter === 'P' ? 'bg-white text-slate-800 shadow-3xs' : 'text-slate-500 hover:text-slate-700'
+                      }`}
+                    >
+                      Perempuan
+                    </button>
+                  </div>
+                )}
+
+                <button
+                  type="button"
+                  onClick={handleMarkAllHadir}
+                  disabled={absensiStudents.length === 0}
+                  className="px-3 py-2 bg-emerald-50 hover:bg-emerald-100 disabled:opacity-50 text-emerald-800 text-[10px] font-extrabold rounded-xl border border-emerald-200 transition-colors flex items-center gap-1"
+                >
+                  ⚡ Hadirkan Semua
+                </button>
+              </div>
+            </div>
+
+            {/* Stats Breakdown Bar */}
+            {(() => {
+              const studentsCount = absensiStudents.length;
+              let hadirCount = 0;
+              let sakitCount = 0;
+              let izinCount = 0;
+              let alpaCount = 0;
+              let haidCount = 0;
+
+              absensiStudents.forEach(s => {
+                const stat = (attendance || []).find(a => a.santriId === s.id && a.date === attendanceDate)?.status;
+                if (stat === 'sakit') sakitCount++;
+                else if (stat === 'izin') izinCount++;
+                else if (stat === 'alpa') alpaCount++;
+                else if (stat === 'haid') haidCount++;
+                else hadirCount++; // Default to present
+              });
+
+              const presentPct = studentsCount > 0 ? Math.round(((hadirCount + haidCount) / studentsCount) * 100) : 0;
+
+              return (
+                <div className="bg-white p-5 rounded-3xl border border-slate-200/60 shadow-xs space-y-3">
+                  <div className="flex items-center justify-between text-xs font-bold text-slate-700">
+                    <span className="flex items-center gap-1.5">
+                      📊 Ringkasan Kehadiran
+                      <span className="text-[10px] bg-emerald-50 text-emerald-700 font-extrabold px-2 py-0.5 rounded-full border border-emerald-100">
+                        Sistem Otomatis (Default: Hadir)
+                      </span>
+                    </span>
+                    <span>{hadirCount + haidCount} / {studentsCount} Santri Aktif/Hadir ({presentPct}%)</span>
+                  </div>
+                  <div className="w-full bg-slate-100 h-2 rounded-full overflow-hidden flex">
+                    <div style={{ width: `${studentsCount > 0 ? (hadirCount / studentsCount) * 100 : 0}%` }} className="bg-emerald-500 h-full" />
+                    <div style={{ width: `${studentsCount > 0 ? (haidCount / studentsCount) * 100 : 0}%` }} className="bg-purple-500 h-full" />
+                    <div style={{ width: `${studentsCount > 0 ? (sakitCount / studentsCount) * 100 : 0}%` }} className="bg-amber-500 h-full" />
+                    <div style={{ width: `${studentsCount > 0 ? (izinCount / studentsCount) * 100 : 0}%` }} className="bg-sky-500 h-full" />
+                    <div style={{ width: `${studentsCount > 0 ? (alpaCount / studentsCount) * 100 : 0}%` }} className="bg-rose-500 h-full" />
+                  </div>
+
+                  <div className={`grid ${genderFilter === 'L' ? 'grid-cols-4' : 'grid-cols-2 sm:grid-cols-5'} gap-2 text-center pt-2`}>
+                    <div className="bg-emerald-50/45 p-2.5 rounded-xl border border-emerald-100/60">
+                      <p className="text-[9px] font-bold text-emerald-700 uppercase">Hadir</p>
+                      <p className="text-base font-extrabold text-emerald-600 mt-0.5">{hadirCount}</p>
+                    </div>
+                    {genderFilter !== 'L' && (
+                      <div className="bg-purple-50/45 p-2.5 rounded-xl border border-purple-100/60">
+                        <p className="text-[9px] font-bold text-purple-700 uppercase">Haid</p>
+                        <p className="text-base font-extrabold text-purple-500 mt-0.5">{haidCount}</p>
+                      </div>
+                    )}
+                    <div className="bg-amber-50/45 p-2.5 rounded-xl border border-amber-100/60">
+                      <p className="text-[9px] font-bold text-amber-700 uppercase">Sakit</p>
+                      <p className="text-base font-extrabold text-amber-500 mt-0.5">{sakitCount}</p>
+                    </div>
+                    <div className="bg-sky-50/45 p-2.5 rounded-xl border border-sky-100/60">
+                      <p className="text-[9px] font-bold text-sky-700 uppercase">Izin</p>
+                      <p className="text-base font-extrabold text-sky-500 mt-0.5">{izinCount}</p>
+                    </div>
+                    <div className="bg-rose-50/45 p-2.5 rounded-xl border border-rose-100/60">
+                      <p className="text-[9px] font-bold text-rose-700 uppercase">Alpa</p>
+                      <p className="text-base font-extrabold text-rose-500 mt-0.5">{alpaCount}</p>
+                    </div>
+                  </div>
+
+                  <p className="text-[10px] text-slate-400 font-medium italic text-center pt-1">
+                    💡 <strong>Kemudahan Mengabsen:</strong> Anda cukup menekan tombol <strong>Sakit, Izin, atau Alpa</strong> untuk santri yang tidak hadir. Santri lainnya otomatis dianggap <strong>Hadir</strong>!
+                  </p>
+                </div>
+              );
+            })()}
+
+            {/* Attendance Table */}
+            <div className="bg-white rounded-3xl border border-slate-200/60 shadow-xs overflow-hidden">
+              <div className="overflow-x-auto">
+                <table className="w-full text-left border-collapse">
+                  <thead>
+                    <tr className="bg-slate-50 border-b border-slate-150 text-[10px] font-extrabold text-slate-400 uppercase tracking-wider">
+                      <th className="py-3.5 px-4 font-extrabold">Santri</th>
+                      <th className="py-3.5 px-4 font-extrabold">Kelas</th>
+                      <th className="py-3.5 px-4 font-extrabold text-center">Status Absensi</th>
+                      <th className="py-3.5 px-4 font-extrabold text-center">Rekap 7 Hari Terakhir</th>
+                    </tr>
+                  </thead>
+                  <tbody className="divide-y divide-slate-100 text-xs">
+                    {absensiStudents.map((santri) => {
+                      const currentStatus = (attendance || []).find(a => a.santriId === santri.id && a.date === attendanceDate)?.status || 'hadir';
+
+                      // Last 7 days attendance summary for this student (Implicit Hadir for days with no entry)
+                      let hCount = 0;
+                      let sCount = 0;
+                      let iCount = 0;
+                      let aCount = 0;
+                      let haidCountRow = 0;
+                      for (let i = 0; i < 7; i++) {
+                        const d = new Date();
+                        d.setDate(d.getDate() - i);
+                        const dStr = d.toISOString().split('T')[0];
+                        const attRecord = (attendance || []).find(a => a.santriId === santri.id && a.date === dStr);
+                        if (attRecord) {
+                          if (attRecord.status === 'sakit') sCount++;
+                          else if (attRecord.status === 'izin') iCount++;
+                          else if (attRecord.status === 'alpa') aCount++;
+                          else if (attRecord.status === 'haid') haidCountRow++;
+                          else hCount++;
+                        } else {
+                          hCount++;
+                        }
+                      }
+
+                      return (
+                        <tr key={santri.id} className="hover:bg-slate-50/50 transition-colors">
+                          <td className="py-3.5 px-4 font-bold text-slate-800">
+                            <div className="flex items-center gap-2.5">
+                              <span className="text-lg">{santri.avatar}</span>
+                              <div>
+                                <p className="font-extrabold text-slate-800 flex items-center gap-1.5">
+                                  {santri.name}
+                                  <span className={`text-[8px] font-extrabold px-1 py-0.2 rounded-full border ${
+                                    santri.gender === 'P'
+                                      ? 'bg-fuchsia-50 border-fuchsia-100 text-fuchsia-600'
+                                      : 'bg-blue-50 border-blue-100 text-blue-600'
+                                  }`}>
+                                    {santri.gender === 'P' ? 'P' : 'L'}
+                                  </span>
+                                </p>
+                              </div>
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-4 font-bold text-slate-500">{santri.class}</td>
+                          <td className="py-3.5 px-4">
+                            <div className="flex items-center justify-center gap-1.5 flex-wrap">
+                              <button
+                                type="button"
+                                onClick={() => handleMarkAttendance(santri.id, 'hadir')}
+                                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold border transition-all ${
+                                  currentStatus === 'hadir'
+                                    ? 'bg-emerald-600 border-emerald-600 text-white font-extrabold shadow-3xs'
+                                    : 'bg-white border-slate-200 hover:bg-emerald-50 text-slate-600 hover:text-emerald-700'
+                                }`}
+                              >
+                                Hadir
+                              </button>
+                              {santri.gender === 'P' && (
+                                <button
+                                  type="button"
+                                  onClick={() => handleMarkAttendance(santri.id, 'haid')}
+                                  className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold border transition-all ${
+                                    currentStatus === 'haid'
+                                      ? 'bg-purple-600 border-purple-600 text-white font-extrabold shadow-3xs'
+                                      : 'bg-white border-slate-200 hover:bg-purple-50 text-slate-600 hover:text-purple-700'
+                                  }`}
+                                >
+                                  Haid
+                                </button>
+                              )}
+                              <button
+                                type="button"
+                                onClick={() => handleMarkAttendance(santri.id, 'sakit')}
+                                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold border transition-all ${
+                                  currentStatus === 'sakit'
+                                    ? 'bg-amber-500 border-amber-500 text-white font-extrabold shadow-3xs'
+                                    : 'bg-white border-slate-200 hover:bg-amber-50 text-slate-600 hover:text-amber-700'
+                                }`}
+                              >
+                                Sakit
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleMarkAttendance(santri.id, 'izin')}
+                                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold border transition-all ${
+                                  currentStatus === 'izin'
+                                    ? 'bg-sky-500 border-sky-500 text-white font-extrabold shadow-3xs'
+                                    : 'bg-white border-slate-200 hover:bg-sky-50 text-slate-600 hover:text-sky-700'
+                                }`}
+                              >
+                                Izin
+                              </button>
+                              <button
+                                type="button"
+                                onClick={() => handleMarkAttendance(santri.id, 'alpa')}
+                                className={`px-2.5 py-1.5 rounded-lg text-[10px] font-bold border transition-all ${
+                                  currentStatus === 'alpa'
+                                    ? 'bg-rose-500 border-rose-500 text-white font-extrabold shadow-3xs'
+                                    : 'bg-white border-slate-200 hover:bg-rose-50 text-slate-600 hover:text-rose-700'
+                                }`}
+                              >
+                                Alpa
+                              </button>
+                            </div>
+                          </td>
+                          <td className="py-3.5 px-4 text-center">
+                            <span className="inline-flex gap-1 items-center justify-center flex-wrap">
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-emerald-50 text-emerald-700 font-extrabold border border-emerald-100">
+                                {hCount} H
+                              </span>
+                              {santri.gender === 'P' && haidCountRow > 0 && (
+                                <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-purple-50 text-purple-700 font-extrabold border border-purple-100">
+                                  {haidCountRow} Haid
+                                </span>
+                              )}
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-amber-50 text-amber-700 font-extrabold border border-amber-100">
+                                {sCount} S
+                              </span>
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-sky-50 text-sky-700 font-extrabold border border-sky-100">
+                                {iCount} I
+                              </span>
+                              <span className="text-[10px] px-1.5 py-0.5 rounded-full bg-rose-50 text-rose-700 font-extrabold border border-rose-100">
+                                {aCount} A
+                              </span>
+                            </span>
+                          </td>
+                        </tr>
+                      );
+                    })}
+
+                    {absensiStudents.length === 0 && (
+                      <tr>
+                        <td colSpan={4} className="py-12 text-center text-slate-400 font-bold italic">
+                          Tidak ada santri yang sesuai dengan filter saat ini.
                         </td>
                       </tr>
                     )}
@@ -1704,6 +2841,18 @@ export default function GuruDashboard({
                   )}
                 </div>
 
+                 {/* WhatsApp */}
+                <div>
+                  <label className="text-[11px] font-bold text-slate-500 uppercase block mb-1.5">No. WhatsApp Orang Tua (628xxx)</label>
+                  <input
+                    type="text"
+                    value={editPhone}
+                    onChange={(e) => setEditPhone(e.target.value.replace(/\D/g, ''))}
+                    className="w-full text-xs p-3 border border-slate-200 bg-slate-50 rounded-xl focus:outline-emerald-500 font-mono"
+                    placeholder="Contoh: 628123456789"
+                  />
+                </div>
+
                 {/* PIN */}
                 <div>
                   <label className="text-[11px] font-bold text-slate-500 uppercase block mb-1.5">PIN / Sandi Masuk (4-Digit)</label>
@@ -1754,6 +2903,228 @@ export default function GuruDashboard({
                   </button>
                 </div>
               </form>
+            </motion.div>
+          </motion.div>
+        )}
+      </AnimatePresence>
+
+      {/* Weekly Mosque Recap & WA Dispatch Modal Overlay */}
+      <AnimatePresence>
+        {showWeeklyRecapModal && weeklyRecapStudentId && (
+          <motion.div
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            exit={{ opacity: 0 }}
+            className="fixed inset-0 bg-slate-900/60 backdrop-blur-xs z-50 flex items-center justify-center p-4"
+          >
+            <motion.div
+              initial={{ scale: 0.95, y: 15 }}
+              animate={{ scale: 1, y: 0 }}
+              exit={{ scale: 0.95, y: 15 }}
+              onClick={(e) => e.stopPropagation()}
+              className="bg-white rounded-3xl p-6 border border-slate-200 max-w-lg w-full shadow-2xl space-y-4 max-h-[90vh] overflow-y-auto scrollbar-thin text-left"
+            >
+              {(() => {
+                const student = santriList.find(s => s.id === weeklyRecapStudentId);
+                if (!student) return null;
+
+                // Simple 7-day stats preview
+                const oneWeekAgo = new Date();
+                oneWeekAgo.setDate(oneWeekAgo.getDate() - 7);
+                const oneWeekAgoStr = oneWeekAgo.toISOString().split('T')[0];
+                const weeklyReports = reports
+                  .filter(r => r.santriId === weeklyRecapStudentId && r.date >= oneWeekAgoStr)
+                  .sort((a, b) => b.date.localeCompare(a.date));
+
+                // Fallback reports
+                const reportsToCount = weeklyReports.length > 0 
+                  ? weeklyReports 
+                  : reports.filter(r => r.santriId === weeklyRecapStudentId).sort((a, b) => b.date.localeCompare(a.date)).slice(0, 5);
+
+                const countReports = reportsToCount.length;
+                let doneShalatCount = 0;
+                reportsToCount.forEach(r => {
+                  if (typeof r.shalat.subuh === 'boolean' ? r.shalat.subuh : r.shalat.subuh?.performed) doneShalatCount++;
+                  if (typeof r.shalat.dzuhur === 'boolean' ? r.shalat.dzuhur : r.shalat.dzuhur?.performed) doneShalatCount++;
+                  if (typeof r.shalat.ashar === 'boolean' ? r.shalat.ashar : r.shalat.ashar?.performed) doneShalatCount++;
+                  if (typeof r.shalat.maghrib === 'boolean' ? r.shalat.maghrib : r.shalat.maghrib?.performed) doneShalatCount++;
+                  if (typeof r.shalat.isya === 'boolean' ? r.shalat.isya : r.shalat.isya?.performed) doneShalatCount++;
+                });
+
+                const prayerPct = countReports > 0 ? Math.round((doneShalatCount / (countReports * 5)) * 100) : 0;
+
+                return (
+                  <>
+                    <div className="border-b border-slate-100 pb-3 flex justify-between items-center">
+                      <div className="flex items-center gap-2">
+                        <span className="text-2xl">🕌</span>
+                        <div>
+                          <h3 className="text-sm font-extrabold text-slate-800">
+                            {currentRole === 'guru' ? 'Evaluasi & Rekap Mingguan' : 'Tulis Catatan Mengaji (Admin)'}
+                          </h3>
+                          <p className="text-[10px] text-slate-400 font-bold mt-0.5">
+                            {currentRole === 'guru' ? 'Simpan evaluasi mingguan untuk langsung dikirim ke akun Orang Tua' : 'Simpan catatan perilaku untuk Guru Ngaji'}
+                          </p>
+                        </div>
+                      </div>
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowWeeklyRecapModal(false);
+                          setWeeklyRecapStudentId(null);
+                        }}
+                        className="text-slate-400 hover:text-slate-600 text-xs font-bold p-1"
+                      >
+                        ✕
+                      </button>
+                    </div>
+
+                    {/* Auto-Aggregated Report Card */}
+                    <div className="bg-slate-50 border border-slate-150 p-4 rounded-2xl space-y-2.5">
+                      <div className="flex justify-between items-center">
+                        <span className="text-xs font-extrabold text-slate-700 flex items-center gap-1.5">
+                          <span>{student.avatar}</span> {student.name} ({student.class})
+                        </span>
+                        <span className="text-[9px] bg-emerald-100 text-emerald-800 border border-emerald-200 px-2 py-0.5 rounded-full font-bold">
+                          7 Hari Terakhir
+                        </span>
+                      </div>
+
+                      <div className="grid grid-cols-2 gap-2 text-[10px] text-slate-600">
+                        <div className="bg-white p-2 rounded-xl border border-slate-100">
+                          <span className="font-bold text-slate-400 block mb-0.5">📅 Keaktifan Lapor</span>
+                          <strong className="text-slate-800 font-extrabold">{countReports} Kali Melapor</strong>
+                        </div>
+                        <div className="bg-white p-2 rounded-xl border border-slate-100">
+                          <span className="font-bold text-slate-400 block mb-0.5">🕌 Disiplin Shalat</span>
+                          <strong className="text-slate-800 font-extrabold">{doneShalatCount}/{countReports * 5} Shalat ({prayerPct}%)</strong>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* Show Admin Draft for Guru to Review & Correct */}
+                    {currentRole === 'guru' && (
+                      <div className="space-y-1.5">
+                        {student.adminMosqueNote ? (
+                          <div className="bg-amber-50/70 border border-amber-200/80 p-3.5 rounded-2xl text-xs text-amber-900 relative overflow-hidden">
+                            <div className="absolute top-0 right-0 bg-amber-500 text-white text-[8px] uppercase tracking-widest font-extrabold px-2 py-0.5 rounded-bl-xl shadow-xs">
+                              Draf Admin
+                            </div>
+                            <div className="font-bold flex items-center gap-1.5 mb-1 text-[10px] uppercase tracking-wider text-amber-800">
+                              <span>📋</span> Draf Catatan Admin Masjid:
+                            </div>
+                            <p className="italic font-medium leading-relaxed font-sans">
+                              "{student.adminMosqueNote}"
+                            </p>
+                            {student.adminMosqueNoteUpdatedAt && (
+                              <p className="text-[8px] text-amber-600 font-mono text-right mt-1">
+                                Dikirim Admin: {new Date(student.adminMosqueNoteUpdatedAt).toLocaleDateString('id-ID', { hour: '2-digit', minute: '2-digit', day: '2-digit', month: 'short' })}
+                              </p>
+                            )}
+                          </div>
+                        ) : (
+                          <div className="bg-slate-50 border border-slate-200/50 p-3 rounded-2xl text-[10px] text-slate-500 italic">
+                            ⚠️ Belum ada draf catatan mengaji dari Admin Masjid untuk santri ini.
+                          </div>
+                        )}
+                      </div>
+                    )}
+
+                    {/* Form Input: Catatan Masjid */}
+                    <div className="space-y-1.5">
+                      <label className="text-[10px] font-extrabold text-slate-500 uppercase tracking-wider block">
+                        {currentRole === 'guru' 
+                          ? '📝 Catatan Akhir / Evaluasi Guru Ngaji (Kirim ke Laporan Orang Tua):' 
+                          : '📝 Catatan Keadaan Saat Mengaji di Masjid (Ditulis Admin):'}
+                      </label>
+                      <textarea
+                        value={tempWeeklyRecap}
+                        onChange={(e) => setTempWeeklyRecap(e.target.value)}
+                        placeholder={currentRole === 'guru'
+                          ? "Ketik koreksi atau tambahkan catatan di sini. Jika kosong, draf admin akan digunakan."
+                          : "Contoh: Ananda mengaji minggu ini dengan sangat tertib, adab mendengarkan materi sangat baik, dan bacaan tajwidnya terus meningkat pesat."
+                        }
+                        className="w-full text-xs p-3 border border-slate-200 bg-white rounded-2xl focus:outline-emerald-500 min-h-[100px] leading-relaxed font-sans"
+                      />
+                      <p className="text-[9px] text-slate-400">
+                        {currentRole === 'guru'
+                          ? '💡 Catatan Guru ini akan langsung tersimpan dan ditampilkan di halaman Laporan Mingguan Orang Tua.'
+                          : '💡 Catatan draf Anda akan dikirim langsung ke Guru Ngaji untuk ditinjau, disunting, atau ditambahkan sebelum dipublikasikan.'}
+                      </p>
+                    </div>
+
+                    {/* Action Buttons based on Role */}
+                    <div className="pt-2 border-t border-slate-100 flex gap-3">
+                      <button
+                        type="button"
+                        onClick={() => {
+                          setShowWeeklyRecapModal(false);
+                          setWeeklyRecapStudentId(null);
+                        }}
+                        className="px-3 py-2.5 border border-slate-200 hover:bg-slate-50 text-slate-600 font-bold rounded-xl text-xs transition-colors"
+                      >
+                        Batal
+                      </button>
+
+                      {currentRole === 'guru' ? (
+                        <>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onUpdateSantri(weeklyRecapStudentId, {
+                                guruMosqueNote: tempWeeklyRecap,
+                                guruMosqueNoteUpdatedAt: new Date().toISOString(),
+                                weeklyRecap: tempWeeklyRecap,
+                                weeklyRecapUpdatedAt: new Date().toISOString()
+                              });
+                              setShowWeeklyRecapModal(false);
+                              setWeeklyRecapStudentId(null);
+                              alert("Alhamdulillah! Evaluasi Guru Ngaji berhasil disimpan.");
+                            }}
+                            className="px-4 py-2.5 bg-slate-100 hover:bg-slate-200 text-slate-800 font-extrabold rounded-xl text-xs flex items-center justify-center gap-1 transition-colors cursor-pointer"
+                            title="Simpan draf evaluasi sementara"
+                          >
+                            <span>💾</span> Simpan Draf
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => {
+                              onUpdateSantri(weeklyRecapStudentId, {
+                                guruMosqueNote: tempWeeklyRecap,
+                                guruMosqueNoteUpdatedAt: new Date().toISOString(),
+                                weeklyRecap: tempWeeklyRecap,
+                                weeklyRecapUpdatedAt: new Date().toISOString()
+                              });
+                              setShowWeeklyRecapModal(false);
+                              setWeeklyRecapStudentId(null);
+                              alert("Alhamdulillah! Evaluasi berhasil disimpan dan langsung dikirim ke Laporan Mingguan Orang Tua.");
+                            }}
+                            className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+                          >
+                            <span>🚀</span> Simpan & Kirim ke Orang Tua
+                          </button>
+                        </>
+                      ) : (
+                        <button
+                          type="button"
+                          onClick={() => {
+                            onUpdateSantri(weeklyRecapStudentId, {
+                              adminMosqueNote: tempWeeklyRecap,
+                              adminMosqueNoteUpdatedAt: new Date().toISOString()
+                            });
+                            setShowWeeklyRecapModal(false);
+                            setWeeklyRecapStudentId(null);
+                            alert("Alhamdulillah! Catatan draf mengaji berhasil disimpan dan dikirim ke Guru Ngaji.");
+                          }}
+                          className="flex-1 py-2.5 bg-emerald-600 hover:bg-emerald-700 text-white font-extrabold rounded-xl text-xs flex items-center justify-center gap-1.5 transition-colors shadow-sm cursor-pointer"
+                        >
+                          <span>💾</span> Simpan & Kirim ke Guru
+                        </button>
+                      )}
+                    </div>
+                  </>
+                );
+              })()}
             </motion.div>
           </motion.div>
         )}

@@ -6,6 +6,20 @@ export interface Santri {
   avatar: string; // Avatar seed or emoji
   pin: string; // Password / PIN to login as Santri
   gender: 'L' | 'P'; // L = Laki-laki, P = Perempuan
+  phone?: string; // WhatsApp / Phone number of parents
+  weeklyRecap?: string; // Weekly behavior recap written by Admin/Ustadz at mosque
+  weeklyRecapUpdatedAt?: string; // Timestamp of when the weekly recap was updated
+  adminMosqueNote?: string; // Mosque learning note written by Admin
+  adminMosqueNoteUpdatedAt?: string; // Timestamp of when Admin wrote/updated the note
+  guruMosqueNote?: string; // Mosque learning note edited/corrected/added by Guru
+  guruMosqueNoteUpdatedAt?: string; // Timestamp of when Guru wrote/updated the note
+}
+
+export interface Attendance {
+  id: string;
+  date: string; // YYYY-MM-DD
+  santriId: string;
+  status: 'hadir' | 'sakit' | 'izin' | 'alpa' | 'haid';
 }
 
 export interface PrayerDetail {
@@ -35,7 +49,7 @@ export interface QuranDetails {
 
 export interface Report {
   id: string;
-  date: string; // YYYY-MM-DD
+  date: string; // YYYY-MM-DD (typically start of week, or representative date)
   santriId: string;
   santriName: string;
   shalat: ShalatStatus;
@@ -56,6 +70,25 @@ export interface Report {
   parentName: string;
   status: 'pending' | 'verified';
   feedback: string;
+  parentFeedback?: string; // Optional feedback / short note from parents to Guru
+  parentFeedbackSubmittedAt?: string; // Timestamp of when parent sent feedback
   verifiedBy?: string; // e.g. "Admin Laki-laki", "Admin Perempuan", "Guru Ngaji"
   submittedAt: string; // Timestamp ISO string
+  
+  // New weekly fields for precise reporting and diagrams
+  isWeeklyReport?: boolean;
+  weeklyShalatCounts?: {
+    subuh: number;
+    dzuhur: number;
+    ashar: number;
+    maghrib: number;
+    isya: number;
+  };
+  weeklySunnahCounts?: {
+    tahajud: number;
+    witir: number;
+    zikir: number;
+  };
+  startDate?: string;
+  endDate?: string;
 }
